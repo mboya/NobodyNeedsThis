@@ -262,18 +262,6 @@ Interactive menu: successful M-Pesa, failed M-Pesa, bank transfer, webhook test.
 
 ---
 
-## Project layout
-
-```
-.
-├── app.rb                 # Sinatra API (the server)
-├── payment_simulator.rb   # Core logic (the fake bank)
-├── demo_scripts.rb       # Interactive demos
-├── webhook_receiver.rb   # Local webhook tester
-├── test_webhook.rb       # Webhook tests
-└── Gemfile
-```
-
 ---
 
 ## Troubleshooting
