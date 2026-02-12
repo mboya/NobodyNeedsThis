@@ -262,8 +262,6 @@ Interactive menu: successful M-Pesa, failed M-Pesa, bank transfer, webhook test.
 
 ---
 
----
-
 ## Troubleshooting
 
 **Port 3000 in use?**
