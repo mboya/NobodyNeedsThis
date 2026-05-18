@@ -1,15 +1,28 @@
 # frozen_string_literal: true
 
 require 'rake/testtask'
+require 'shellwords'
 
-desc 'Start the Sinatra server'
+desc 'Start via Rack (same entrypoint as Vercel)'
+task :rack do
+  port = ENV.fetch('PORT', 9292)
+  exec "bundle exec rackup config.ru -p #{port} -o 0.0.0.0"
+end
+
+desc 'Start the Sinatra server directly'
 task :server do
   exec 'ruby app.rb'
 end
 
-desc 'Start the server with auto-reload'
+desc 'Start with auto-reload (direct mode)'
 task :dev do
   exec 'bundle exec rerun ruby app.rb'
+end
+
+desc 'Start with auto-reload (Rack mode, Vercel parity)'
+task 'dev:rack' do
+  port = ENV.fetch('PORT', 9292)
+  exec "bundle exec rerun 'rackup config.ru -p #{port} -o 0.0.0.0'"
 end
 
 desc 'Run demo scripts'
@@ -67,6 +80,27 @@ end
 desc 'Test auto-complete functionality'
 task :test_auto_complete do
   exec 'ruby test_auto_complete.rb'
+end
+
+desc 'Full E2E test suite (requires running servers, or use ci)'
+task :e2e do
+  exec 'ruby test_e2e.rb'
+end
+
+desc 'Syntax check Ruby sources'
+task :syntax do
+  files = (
+    %w[app.rb config.ru payment_simulator.rb webhook_receiver.rb Rakefile] +
+    Dir['test_*.rb'] +
+    Dir['lib/**/*.rb']
+  ).sort
+  sh "ruby -c #{files.shelljoin}"
+end
+
+desc 'Run CI locally (syntax + E2E with services)'
+task :ci do
+  Rake::Task[:syntax].invoke
+  sh 'bash scripts/ci.sh'
 end
 
 desc 'Show all available tasks'

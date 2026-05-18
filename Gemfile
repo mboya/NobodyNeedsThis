@@ -2,7 +2,8 @@
 
 source 'https://rubygems.org'
 
-ruby '>= 2.7.0'
+# Vercel Ruby runtime defaults to 3.3.x; see .ruby-version
+ruby '>= 3.2.0', '< 3.5.0'
 
 gem 'sinatra', '~> 3.0'
 gem 'sinatra-contrib', '~> 3.0'

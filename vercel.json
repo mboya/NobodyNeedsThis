@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "build": {
+    "env": {
+      "RACK_ENV": "production"
+    }
+  },
+  "env": {
+    "RACK_ENV": "production"
+  },
+  "functions": {
+    "config.ru": {
+      "maxDuration": 30
+    }
+  }
+}

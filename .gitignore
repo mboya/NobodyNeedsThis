@@ -1,0 +1,8 @@
+.idea/
+.bundle/
+vendor/bundle/
+.vercel/
+*.log
+.env
+.env.local
+.env.*.local
