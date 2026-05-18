@@ -7,10 +7,5 @@
   },
   "env": {
     "RACK_ENV": "production"
-  },
-  "functions": {
-    "config.ru": {
-      "maxDuration": 30
-    }
   }
 }
