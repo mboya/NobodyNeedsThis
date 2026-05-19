@@ -26,6 +26,31 @@ curl -X POST http://localhost:3000/api/payments/mpesa/stk-push \
 
 You'll get a transaction ID. Wait ~2 seconds. The callback fires. Magic. (It's not magic, it's just fake money.)
 
+### API keys (public demo / production)
+
+On the hosted instance you don't need a shared `API_KEY` env var. Generate your own key:
+
+```bash
+curl -X POST https://nobody-needs-this.vercel.app/api/keys \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Save the `api_key` from the response (shown once). Use it on every request:
+
+```bash
+curl -H "Authorization: Bearer ps_live_…" …
+```
+
+Or open [`/docs`](https://nobody-needs-this.vercel.app/docs) and click **Generate API key**.
+
+**Vercel deployers:** add [Upstash Redis](https://upstash.com) REST credentials so keys persist across serverless instances:
+
+- `UPSTASH_REDIS_REST_URL`
+- `UPSTASH_REDIS_REST_TOKEN`
+
+Set `ENABLE_API_KEY_REGISTRATION=false` and `API_KEY=…` if you prefer a single shared key (private installs).
+
 ---
 
 ## What It Does (That You'll Probably Never Use)
@@ -45,6 +70,8 @@ You'll get a transaction ID. Wait ~2 seconds. The callback fires. Magic. (It's n
 | Method | Endpoint | What it does |
 |--------|----------|--------------|
 | GET | `/api/health` | Are you alive? |
+| POST | `/api/keys` | Create your API key (public when registration enabled) |
+| DELETE | `/api/keys` | Revoke the key you're using |
 | POST | `/api/payments/mpesa/stk-push` | Start M-Pesa flow |
 | POST | `/api/payments/mpesa/callback` | Manually trigger callback |
 | POST | `/api/payments/bank-transfer` | Start bank transfer |
