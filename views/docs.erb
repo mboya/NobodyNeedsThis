@@ -16,12 +16,20 @@
 <% if @auth_required %>
 <section class="alert" id="auth">
   <strong>Authentication required.</strong>
-  Send your API key on every request (except <code>/api/health</code> and this page):
-  <ul style="margin: 0.75rem 0 0 1.25rem;">
+  <% if @registration_enabled %>
+  <p style="margin: 0.75rem 0;">Generate your own API key — no signup, no env vars:</p>
+  <p style="margin: 0.5rem 0;">
+    <button type="button" id="generate-key-btn" style="background:var(--accent);color:#0f1419;border:none;padding:0.5rem 1rem;border-radius:6px;font-weight:600;cursor:pointer;">Generate API key</button>
+  </p>
+  <pre id="generated-key" style="display:none;margin-top:0.75rem;"><code></code></pre>
+  <p style="margin:0.75rem 0 0;font-size:0.85rem;color:var(--muted);">Or call <code>POST <%= @base_url %>/api/keys</code> with an empty JSON body.</p>
+  <% end %>
+  <p style="margin: 0.75rem 0 0;">Send your key on every request (except public routes):</p>
+  <ul style="margin: 0.5rem 0 0 1.25rem;">
     <li><code>Authorization: Bearer YOUR_API_KEY</code></li>
     <li><code>X-API-Key: YOUR_API_KEY</code></li>
   </ul>
-  Admin routes (<code>POST /api/payments/reset</code>) need <code>ADMIN_API_KEY</code> in production.
+  <p style="margin:0.75rem 0 0;font-size:0.85rem;">Revoke: <code>DELETE /api/keys</code> with your key. Admin routes need <code>ADMIN_API_KEY</code> in production.</p>
 </section>
 <% else %>
 <section class="info" id="auth">

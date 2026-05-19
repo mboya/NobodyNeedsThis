@@ -136,6 +136,28 @@
     <%= yield %>
   </main>
   <script>
+    const genBtn = document.getElementById('generate-key-btn');
+    if (genBtn) {
+      genBtn.addEventListener('click', async () => {
+        genBtn.disabled = true;
+        genBtn.textContent = 'Generating…';
+        try {
+          const res = await fetch('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.message || res.statusText);
+          const pre = document.getElementById('generated-key');
+          pre.style.display = 'block';
+          pre.querySelector('code').textContent = data.api_key;
+          genBtn.textContent = 'Copy key';
+          genBtn.disabled = false;
+          genBtn.onclick = () => navigator.clipboard.writeText(data.api_key);
+        } catch (e) {
+          genBtn.textContent = 'Failed — try again';
+          genBtn.disabled = false;
+          alert(e.message);
+        }
+      });
+    }
     document.querySelectorAll('.copy-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const pre = btn.parentElement.querySelector('code');
