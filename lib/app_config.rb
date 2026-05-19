@@ -19,18 +19,26 @@ module AppConfig
     @api_keys ||= parse_list(ENV.fetch('API_KEYS', ENV.fetch('API_KEY', '')))
   end
 
+  def env_api_keys
+    api_keys
+  end
+
+  def registration_enabled?
+    ENV.fetch('ENABLE_API_KEY_REGISTRATION', 'true') == 'true'
+  end
+
   def admin_api_key
     ENV['ADMIN_API_KEY'].to_s.strip
   end
 
   def auth_required?
-    return true if production?
+    return false if development? && !api_keys.any? && !registration_enabled?
 
-    api_keys.any?
+    true
   end
 
   def auth_configured?
-    api_keys.any?
+    api_keys.any? || registration_enabled?
   end
 
   def admin_configured?
