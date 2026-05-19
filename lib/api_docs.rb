@@ -11,7 +11,25 @@ module ApiDocs
         title: 'Health check',
         auth: false,
         description: 'Returns service status. No authentication required.',
-        response: '{ "status": "healthy", "service": "payment-simulator", "environment": "production", "auth_required": true }'
+        response: '{ "status": "healthy", "service": "payment-simulator", "environment": "production", "auth_required": true, "registration_enabled": true, "api_key_store": "redis" }'
+      },
+      {
+        method: 'POST',
+        path: '/api/keys',
+        title: 'Create API key',
+        auth: false,
+        description: 'Generate a personal API key (shown once). No auth required when ENABLE_API_KEY_REGISTRATION is true. Rate-limited per IP.',
+        body: '{}',
+        response: '{ "success": true, "api_key": "ps_live_…", "message": "Save this key now…" }'
+      },
+      {
+        method: 'DELETE',
+        path: '/api/keys',
+        title: 'Revoke API key',
+        auth: true,
+        description: 'Revokes the API key sent on this request. Bootstrap/env keys cannot be revoked via this endpoint.',
+        body: nil,
+        response: '{ "success": true, "message": "API key revoked" }'
       },
       {
         method: 'POST',
