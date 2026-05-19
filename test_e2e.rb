@@ -9,6 +9,7 @@ WEBHOOK_BASE = ENV.fetch('WEBHOOK_BASE', 'http://localhost:4567')
 API_KEY = ENV['API_KEY']
 VERCEL_BYPASS = ENV['VERCEL_PROTECTION_BYPASS']
 SKIP_WEBHOOKS = ENV['SKIP_WEBHOOKS'] == '1'
+WEBHOOK_SITE_TOKEN = ENV['WEBHOOK_SITE_TOKEN']
 
 class E2ERunner
   def initialize
@@ -66,6 +67,27 @@ class E2ERunner
 
     section 'Listing'
     assert_list_payments
+
+    summary
+    exit(@failed.positive? ? 1 : 0)
+  end
+
+  def run_webhooks_only
+    header 'Payment Simulator — Webhook E2E'
+    puts "API: #{BASE}"
+    if WEBHOOK_SITE_TOKEN
+      puts "Webhook inbox: https://webhook.site/#{WEBHOOK_SITE_TOKEN}"
+    else
+      puts "Webhook receiver: #{WEBHOOK_BASE}"
+    end
+    puts ''
+
+    reset_webhooks
+    section 'Webhooks'
+    assert_mpesa_webhook_success
+    assert_mpesa_webhook_failure
+    assert_bank_webhook_success
+    assert_bank_webhook_failure
 
     summary
     exit(@failed.positive? ? 1 : 0)
@@ -155,6 +177,13 @@ class E2ERunner
   end
 
   def reset_webhooks
+    if WEBHOOK_SITE_TOKEN
+      uri = URI("https://webhook.site/token/#{WEBHOOK_SITE_TOKEN}/request")
+      req = Net::HTTP::Delete.new(uri)
+      http_for(uri).request(req)
+      return
+    end
+
     uri = URI("#{WEBHOOK_BASE}/webhooks/clear")
     req = Net::HTTP::Post.new(uri)
     req['Content-Type'] = 'application/json'
@@ -173,11 +202,32 @@ class E2ERunner
   end
 
   def fetch_webhooks
+    return fetch_webhooks_from_site if WEBHOOK_SITE_TOKEN
+
     uri = URI("#{WEBHOOK_BASE}/webhooks")
     req = Net::HTTP::Get.new(uri)
     apply_vercel_headers(req)
     response = http_for(uri).request(req)
     JSON.parse(response.body, symbolize_names: true)
+  end
+
+  def fetch_webhooks_from_site
+    uri = URI("https://webhook.site/token/#{WEBHOOK_SITE_TOKEN}/requests?sorting=newest")
+    response = http_for(uri).request(Net::HTTP::Get.new(uri))
+    data = JSON.parse(response.body, symbolize_names: true)[:data] || []
+
+    webhooks = data.filter_map do |req|
+      next if req[:content].to_s.empty?
+
+      payload = JSON.parse(req[:content], symbolize_names: true)
+      path = req[:url].to_s
+      type = path.include?('bank') ? 'bank' : 'mpesa'
+      { type: type, timestamp: req[:created_at], payload: payload }
+    rescue JSON::ParserError
+      nil
+    end
+
+    { count: webhooks.length, webhooks: webhooks }
   end
 
   def poll_timeout
@@ -449,4 +499,8 @@ class E2ERunner
   end
 end
 
-E2ERunner.new.run
+if ENV['WEBHOOK_ONLY'] == '1'
+  E2ERunner.new.run_webhooks_only
+else
+  E2ERunner.new.run
+end
