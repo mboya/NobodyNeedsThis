@@ -7,6 +7,8 @@ require 'uri'
 BASE = ENV.fetch('API_BASE', 'http://localhost:3000')
 WEBHOOK_BASE = ENV.fetch('WEBHOOK_BASE', 'http://localhost:4567')
 API_KEY = ENV['API_KEY']
+VERCEL_BYPASS = ENV['VERCEL_PROTECTION_BYPASS']
+SKIP_WEBHOOKS = ENV['SKIP_WEBHOOKS'] == '1'
 
 class E2ERunner
   def initialize
@@ -22,7 +24,7 @@ class E2ERunner
     puts "Auth: #{API_KEY ? 'enabled' : 'disabled'}"
     puts ''
 
-    reset_webhooks
+    reset_webhooks unless SKIP_WEBHOOKS
     reset_transactions
 
     section 'Infrastructure'
@@ -51,12 +53,16 @@ class E2ERunner
     assert_bank_auto_success
     assert_bank_auto_failure
 
-    section 'Webhooks'
-    reset_webhooks
-    assert_mpesa_webhook_success
-    assert_mpesa_webhook_failure
-    assert_bank_webhook_success
-    assert_bank_webhook_failure
+    unless SKIP_WEBHOOKS
+      section 'Webhooks'
+      reset_webhooks
+      assert_mpesa_webhook_success
+      assert_mpesa_webhook_failure
+      assert_bank_webhook_success
+      assert_bank_webhook_failure
+    else
+      puts "\n(Skipping webhook tests — set WEBHOOK_BASE for callback delivery tests)"
+    end
 
     section 'Listing'
     assert_list_payments
@@ -106,17 +112,38 @@ class E2ERunner
     puts ''
   end
 
+  def apply_vercel_headers(req)
+    req['x-vercel-protection-bypass'] = VERCEL_BYPASS if VERCEL_BYPASS && !VERCEL_BYPASS.empty?
+  end
+
+  def http_for(uri)
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = (uri.scheme == 'https')
+    http.open_timeout = 15
+    http.read_timeout = 30
+    http
+  end
+
   def http_request(method, path, body: nil)
     uri = URI("#{BASE}#{path}")
-    http = Net::HTTP.new(uri.host, uri.port)
     req_class = Net::HTTP.const_get(method.capitalize)
     req = req_class.new(uri)
     req['Content-Type'] = 'application/json'
     req['Authorization'] = "Bearer #{API_KEY}" if API_KEY
+    apply_vercel_headers(req)
     req.body = body.to_json if body
-    response = http.request(req)
-    parsed = response.body.to_s.empty? ? {} : JSON.parse(response.body, symbolize_names: true)
+    response = http_for(uri).request(req)
+    parsed = parse_response(response)
     [response.code.to_i, parsed]
+  end
+
+  def parse_response(response)
+    return {} if response.body.to_s.empty?
+    return { raw: response.body } unless response['content-type']&.include?('application/json')
+
+    JSON.parse(response.body, symbolize_names: true)
+  rescue JSON::ParserError
+    { raw: response.body.to_s[0, 200] }
   end
 
   def get(path)
@@ -129,9 +156,13 @@ class E2ERunner
 
   def reset_webhooks
     uri = URI("#{WEBHOOK_BASE}/webhooks/clear")
-    Net::HTTP.post(uri, '{}', 'Content-Type' => 'application/json')
-  rescue Errno::ECONNREFUSED
-    fail('Webhook receiver reachable', 'start with: ruby webhook_receiver.rb')
+    req = Net::HTTP::Post.new(uri)
+    req['Content-Type'] = 'application/json'
+    apply_vercel_headers(req)
+    req.body = '{}'
+    http_for(uri).request(req)
+  rescue Errno::ECONNREFUSED, SocketError, OpenSSL::SSL::SSLError => e
+    fail('Webhook receiver reachable', e.message)
     summary
     exit 1
   end
@@ -143,7 +174,10 @@ class E2ERunner
 
   def fetch_webhooks
     uri = URI("#{WEBHOOK_BASE}/webhooks")
-    JSON.parse(Net::HTTP.get(uri), symbolize_names: true)
+    req = Net::HTTP::Get.new(uri)
+    apply_vercel_headers(req)
+    response = http_for(uri).request(req)
+    JSON.parse(response.body, symbolize_names: true)
   end
 
   def poll_timeout
@@ -187,6 +221,8 @@ class E2ERunner
     code, body = get('/api/health')
     if code == 200 && body[:status] == 'healthy'
       pass('Health check', body[:service])
+    elsif body[:raw]&.include?('Authentication Required')
+      fail('Health check', 'Vercel deployment protection — set VERCEL_PROTECTION_BYPASS or disable protection')
     else
       fail('Health check', "HTTP #{code} #{body}")
     end
@@ -194,11 +230,11 @@ class E2ERunner
 
   def assert_unauthorized_without_key
     uri = URI("#{BASE}/api/payments/mpesa/stk-push")
-    http = Net::HTTP.new(uri.host, uri.port)
     req = Net::HTTP::Post.new(uri)
     req['Content-Type'] = 'application/json'
+    apply_vercel_headers(req)
     req.body = { phone_number: '254712345678', amount: 100 }.to_json
-    code = http.request(req).code.to_i
+    code = http_for(uri).request(req).code.to_i
     code == 401 ? pass('Rejects unauthenticated request', 'HTTP 401') : fail('Rejects unauthenticated request', "HTTP #{code}")
   end
 

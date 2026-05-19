@@ -194,6 +194,15 @@ after do
   log_request_finish
 end
 
+get '/' do
+  json(
+    service: 'payment-simulator',
+    status: 'ok',
+    health: '/api/health',
+    docs: 'See README for API endpoints'
+  )
+end
+
 # Health check (public, no auth)
 get '/api/health' do
   json(

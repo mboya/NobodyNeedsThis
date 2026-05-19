@@ -1,5 +1,27 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "builds": [
+    {
+      "src": "config.ru",
+      "use": "@vercel/ruby",
+      "config": {
+        "includeFiles": [
+          "app.rb",
+          "payment_simulator.rb",
+          "lib/**",
+          "Gemfile",
+          "Gemfile.lock"
+        ]
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "config.ru"
+    }
+  ],
   "build": {
     "env": {
       "RACK_ENV": "production"
