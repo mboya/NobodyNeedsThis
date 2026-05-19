@@ -6,6 +6,8 @@ Basically: it pretends to be a payment provider. You give it a phone number and 
 
 **⚠️ Built for:** demos, local dev, testing webhooks before you go live. **Not production. Never production.**
 
+**📖 Live API docs:** [https://nobody-needs-this.vercel.app/docs](https://nobody-needs-this.vercel.app/docs) — interactive reference, curl examples, and one-click API key generation.
+
 ---
 
 ## Quick Start
@@ -42,7 +44,7 @@ Save the `api_key` from the response (shown once). Use it on every request:
 curl -H "Authorization: Bearer ps_live_…" …
 ```
 
-Or open [`/docs`](https://nobody-needs-this.vercel.app/docs) and click **Generate API key**.
+Or open the [live docs](https://nobody-needs-this.vercel.app/docs) and click **Generate API key**.
 
 **Vercel deployers:** add [Upstash Redis](https://upstash.com) REST credentials so keys persist across serverless instances:
 
