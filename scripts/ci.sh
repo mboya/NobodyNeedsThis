@@ -26,7 +26,9 @@ trap cleanup EXIT
 : >"$API_LOG"
 : >"$WEBHOOK_LOG"
 
-echo "Starting payment simulator on ${API_HOST}:${API_PORT}..."
+export RACK_ENV="${RACK_ENV:-development}"
+
+echo "Starting payment simulator on ${API_HOST}:${API_PORT} (RACK_ENV=${RACK_ENV})..."
 bundle exec rackup config.ru -p "$API_PORT" -o "$API_HOST" >>"$API_LOG" 2>&1 &
 API_PID=$!
 

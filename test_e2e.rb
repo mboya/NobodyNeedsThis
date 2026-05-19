@@ -6,7 +6,6 @@ require 'uri'
 
 BASE = ENV.fetch('API_BASE', 'http://localhost:3000')
 WEBHOOK_BASE = ENV.fetch('WEBHOOK_BASE', 'http://localhost:4567')
-API_KEY = ENV['API_KEY']
 VERCEL_BYPASS = ENV['VERCEL_PROTECTION_BYPASS']
 SKIP_WEBHOOKS = ENV['SKIP_WEBHOOKS'] == '1'
 WEBHOOK_SITE_TOKEN = ENV['WEBHOOK_SITE_TOKEN']
@@ -16,13 +15,15 @@ class E2ERunner
     @passed = 0
     @failed = 0
     @results = []
+    @api_key = ENV['API_KEY']
   end
 
   def run
     header 'Payment Simulator — Full E2E'
     puts "API: #{BASE}"
     puts "Webhook receiver: #{WEBHOOK_BASE}"
-    puts "Auth: #{API_KEY ? 'enabled' : 'disabled'}"
+    resolve_api_key!
+    puts "Auth: #{@api_key ? 'enabled' : 'disabled'}"
     puts ''
 
     reset_webhooks unless SKIP_WEBHOOKS
@@ -30,7 +31,7 @@ class E2ERunner
 
     section 'Infrastructure'
     assert_health
-    assert_unauthorized_without_key if API_KEY
+    assert_unauthorized_without_key if @api_key
 
     section 'Validation & errors'
     assert_mpesa_missing_fields
@@ -75,6 +76,7 @@ class E2ERunner
   def run_webhooks_only
     header 'Payment Simulator — Webhook E2E'
     puts "API: #{BASE}"
+    resolve_api_key!
     if WEBHOOK_SITE_TOKEN
       puts "Webhook inbox: https://webhook.site/#{WEBHOOK_SITE_TOKEN}"
     else
@@ -146,12 +148,22 @@ class E2ERunner
     http
   end
 
-  def http_request(method, path, body: nil)
+  def resolve_api_key!
+    return if @api_key
+
+    code, health = get('/api/health')
+    return unless code == 200 && health[:auth_required]
+
+    reg_code, body = post('/api/keys', {})
+    @api_key = body[:api_key] if reg_code == 200 && body[:api_key]
+  end
+
+  def http_request(method, path, body: nil, auth: true)
     uri = URI("#{BASE}#{path}")
     req_class = Net::HTTP.const_get(method.capitalize)
     req = req_class.new(uri)
     req['Content-Type'] = 'application/json'
-    req['Authorization'] = "Bearer #{API_KEY}" if API_KEY
+    req['Authorization'] = "Bearer #{@api_key}" if auth && @api_key
     apply_vercel_headers(req)
     req.body = body.to_json if body
     response = http_for(uri).request(req)
