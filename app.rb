@@ -8,6 +8,8 @@ require_relative 'lib/app_config'
 require_relative 'lib/structured_logger'
 require_relative 'lib/rate_limiter'
 require_relative 'lib/security'
+require_relative 'lib/api_key_store'
+require_relative 'lib/tenant_registry'
 require_relative 'lib/api_docs'
 require_relative 'lib/docs_helpers'
 require_relative 'payment_simulator'
@@ -45,7 +47,6 @@ end
 set :allow_methods, 'GET,POST,OPTIONS'
 set :allow_headers, 'content-type,authorization,x-api-key,x-request-id'
 
-$simulator = PaymentSimulator::Simulator.new(success_rate: AppConfig.success_rate)
 $general_rate_limiter = RateLimiter.new(
   max_requests: AppConfig.rate_limit_max,
   window_seconds: AppConfig.rate_limit_window_seconds
@@ -54,13 +55,17 @@ $webhook_rate_limiter = RateLimiter.new(
   max_requests: AppConfig.rate_limit_webhook_max,
   window_seconds: AppConfig.rate_limit_window_seconds
 )
+$key_registration_rate_limiter = RateLimiter.new(
+  max_requests: ENV.fetch('KEY_REGISTRATION_RATE_LIMIT', '10').to_i,
+  window_seconds: ENV.fetch('KEY_REGISTRATION_RATE_WINDOW', '3600').to_i
+)
 
 def halt_json(status_code, payload)
   halt status_code, payload.to_json
 end
 
 def require_api_key!
-  return if Security.public_path?(request.path_info)
+  return if Security.public_path?(request.path_info, method: request.request_method)
   return unless AppConfig.auth_required?
 
   if AppConfig.production? && !AppConfig.auth_configured?
@@ -69,7 +74,10 @@ def require_api_key!
   end
 
   key = Security.extract_api_key(request)
-  return if Security.valid_api_key?(key)
+  if Security.valid_api_key?(key)
+    request.env['payment_simulator.api_key'] = key
+    return
+  end
 
   StructuredLogger.warn(
     event: 'auth.denied',
@@ -78,6 +86,15 @@ def require_api_key!
     client_ip: Security.client_ip(request)
   )
   halt_json 401, success: false, message: 'Unauthorized'
+end
+
+def current_api_key
+  request.env['payment_simulator.api_key']
+end
+
+def current_simulator
+  tenant_key = current_api_key || 'anonymous'
+  TenantRegistry.for(tenant_key)
 end
 
 def require_admin_key!
@@ -94,10 +111,17 @@ def require_admin_key!
 end
 
 def enforce_rate_limit!
-  return if Security.public_path?(request.path_info)
   return if request.request_method == 'OPTIONS'
 
-  limiter = Security.webhook_path?(request.path_info) ? $webhook_rate_limiter : $general_rate_limiter
+  limiter = if request.post? && request.path_info == '/api/keys'
+              $key_registration_rate_limiter
+            elsif Security.public_path?(request.path_info, method: request.request_method)
+              return
+            elsif Security.webhook_path?(request.path_info)
+              $webhook_rate_limiter
+            else
+              $general_rate_limiter
+            end
   client_key = "#{Security.client_ip(request)}:#{request.path_info}"
 
   return if limiter.allow?(client_key)
@@ -144,12 +168,12 @@ def log_request_finish
   )
 end
 
-def schedule_callback(transaction_id, delay, force_success = nil)
+def schedule_callback(transaction_id, delay, force_success = nil, simulator:)
   Thread.new do
     sleep delay
-    result = $simulator.simulate_mpesa_callback(transaction_id, force_success: force_success)
+    result = simulator.simulate_mpesa_callback(transaction_id, force_success: force_success)
     result_code = result.dig(:Body, :stkCallback, :ResultCode)
-    txn = $simulator.transactions[transaction_id]
+    txn = simulator.transactions[transaction_id]
 
     StructuredLogger.info(
       event: 'callback.mpesa.completed',
@@ -166,11 +190,11 @@ def schedule_callback(transaction_id, delay, force_success = nil)
   end
 end
 
-def schedule_bank_completion(transaction_id, delay, force_success = nil)
+def schedule_bank_completion(transaction_id, delay, force_success = nil, simulator:)
   Thread.new do
     sleep delay
-    result = $simulator.simulate_bank_transfer_completion(transaction_id, force_success: force_success)
-    txn = $simulator.transactions[transaction_id]
+    result = simulator.simulate_bank_transfer_completion(transaction_id, force_success: force_success)
+    txn = simulator.transactions[transaction_id]
 
     StructuredLogger.info(
       event: 'callback.bank.completed',
@@ -208,6 +232,7 @@ get '/docs' do
   @base_url = base
   @environment = AppConfig.rack_env
   @auth_required = AppConfig.auth_required?
+  @registration_enabled = AppConfig.registration_enabled?
   @endpoints = DocsHelpers.prepare_endpoints(base)
   @mpesa_codes = ApiDocs.mpesa_result_codes
   content_type 'text/html'
@@ -229,8 +254,51 @@ get '/api/health' do
     status: 'healthy',
     service: 'payment-simulator',
     environment: AppConfig.rack_env,
-    auth_required: AppConfig.auth_required?
+    auth_required: AppConfig.auth_required?,
+    registration_enabled: AppConfig.registration_enabled?,
+    api_key_store: ApiKeyStore.using_redis? ? 'redis' : 'memory'
   )
+end
+
+# Self-service API key (public when registration is enabled)
+post '/api/keys' do
+  halt_json 403, success: false, message: 'API key registration is disabled' unless AppConfig.registration_enabled?
+
+  key = ApiKeyStore.generate_key
+  unless ApiKeyStore.register(key)
+    halt_json 503, success: false, message: 'Could not register API key'
+  end
+
+  StructuredLogger.info(
+    event: 'api_key.created',
+    request_id: Security.request_id(request),
+    client_ip: Security.client_ip(request),
+    key_prefix: key[0, 12]
+  )
+
+  json(
+    success: true,
+    api_key: key,
+    message: 'Save this key now — it will not be shown again. Use Authorization: Bearer <api_key> or X-API-Key header.'
+  )
+end
+
+# Revoke the API key used on this request (does not apply to env/bootstrap keys)
+delete '/api/keys' do
+  key = current_api_key
+  halt_json 401, success: false, message: 'Unauthorized' if key.nil? || key.empty?
+  halt_json 400, success: false, message: 'Cannot revoke a bootstrap API key' if AppConfig.env_api_keys.include?(key)
+
+  ApiKeyStore.revoke(key)
+  TenantRegistry.reset!(key)
+
+  StructuredLogger.info(
+    event: 'api_key.revoked',
+    request_id: Security.request_id(request),
+    key_prefix: key[0, 12]
+  )
+
+  json(success: true, message: 'API key revoked')
 end
 
 # Debug — disabled in production unless ADMIN_API_KEY is set
@@ -255,7 +323,8 @@ post '/api/payments/mpesa/stk-push' do
     return json(success: false, message: 'Missing required fields')
   end
 
-  response = $simulator.initiate_mpesa_payment(
+  sim = current_simulator
+  response = sim.initiate_mpesa_payment(
     phone_number: request_body[:phone_number],
     amount: request_body[:amount],
     account_reference: request_body[:account_reference] || 'TEST',
@@ -275,7 +344,7 @@ post '/api/payments/mpesa/stk-push' do
   auto_complete = request_body.fetch(:auto_complete, true)
   force_success = request_body[:force_success]
 
-  schedule_callback(transaction_id, 2, force_success) if auto_complete
+  schedule_callback(transaction_id, 2, force_success, simulator: sim) if auto_complete
 
   json response
 end
@@ -288,7 +357,7 @@ post '/api/payments/mpesa/callback' do
     return json(success: false, message: 'Missing transaction_id')
   end
 
-  callback = $simulator.simulate_mpesa_callback(
+  callback = current_simulator.simulate_mpesa_callback(
     request_body[:transaction_id],
     force_success: request_body[:force_success]
   )
@@ -307,7 +376,8 @@ post '/api/payments/bank-transfer' do
     return json(success: false, message: 'Missing required fields')
   end
 
-  response = $simulator.initiate_bank_transfer(
+  sim = current_simulator
+  response = sim.initiate_bank_transfer(
     account_number: request_body[:account_number],
     bank_code: request_body[:bank_code],
     amount: request_body[:amount],
@@ -328,7 +398,7 @@ post '/api/payments/bank-transfer' do
   auto_complete = request_body.fetch(:auto_complete, true)
   force_success = request_body[:force_success]
 
-  schedule_bank_completion(transaction_id, 3, force_success) if auto_complete
+  schedule_bank_completion(transaction_id, 3, force_success, simulator: sim) if auto_complete
 
   json response
 end
@@ -341,7 +411,7 @@ post '/api/payments/bank-transfer/complete' do
     return json(success: false, message: 'Missing transaction_id')
   end
 
-  result = $simulator.simulate_bank_transfer_completion(
+  result = current_simulator.simulate_bank_transfer_completion(
     request_body[:transaction_id],
     force_success: request_body[:force_success]
   )
@@ -350,7 +420,7 @@ post '/api/payments/bank-transfer/complete' do
 end
 
 get '/api/payments/:transaction_id' do
-  result = $simulator.get_transaction_status(params[:transaction_id])
+  result = current_simulator.get_transaction_status(params[:transaction_id])
 
   unless result[:success]
     status 404
@@ -361,7 +431,7 @@ get '/api/payments/:transaction_id' do
 end
 
 get '/api/payments' do
-  result = $simulator.list_transactions(
+  result = current_simulator.list_transactions(
     status: params[:status],
     method: params[:method]
   )
@@ -373,7 +443,7 @@ post '/api/payments/reset' do
   halt_json 404, success: false, message: 'Not found' unless AppConfig.reset_enabled?
   require_admin_key! if AppConfig.production?
 
-  $simulator.reset_transactions
+  current_simulator.reset_transactions
   StructuredLogger.warn(event: 'transactions.reset', request_id: Security.request_id(request))
 
   json(success: true, message: 'All transactions cleared')
@@ -397,7 +467,7 @@ configure do
   if AppConfig.production? && !AppConfig.auth_configured?
     StructuredLogger.error(
       event: 'startup.warning',
-      message: 'API_KEY is not set — all authenticated routes will return 503'
+      message: 'Neither API_KEY nor ENABLE_API_KEY_REGISTRATION is configured'
     )
   end
 
