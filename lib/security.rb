@@ -11,7 +11,7 @@ module Security
     /api/payments/bank-transfer/complete
   ].freeze
 
-  PUBLIC_PATHS = %w[/api/health].freeze
+  PUBLIC_PATHS = %w[/ /docs /api/health].freeze
 
   module_function
 

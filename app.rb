@@ -8,7 +8,11 @@ require_relative 'lib/app_config'
 require_relative 'lib/structured_logger'
 require_relative 'lib/rate_limiter'
 require_relative 'lib/security'
+require_relative 'lib/api_docs'
+require_relative 'lib/docs_helpers'
 require_relative 'payment_simulator'
+
+set :views, File.expand_path('views', __dir__)
 
 set :environment, AppConfig.rack_env.to_sym
 set :logging, false
@@ -195,11 +199,27 @@ after do
 end
 
 get '/' do
+  redirect '/docs'
+end
+
+get '/docs' do
+  base = "#{request.scheme}://#{request.host_with_port}"
+  @page_title = 'Payment Simulator — API Docs'
+  @base_url = base
+  @environment = AppConfig.rack_env
+  @auth_required = AppConfig.auth_required?
+  @endpoints = DocsHelpers.prepare_endpoints(base)
+  @mpesa_codes = ApiDocs.mpesa_result_codes
+  content_type 'text/html'
+  erb :docs, layout: :layout
+end
+
+get '/api' do
   json(
     service: 'payment-simulator',
     status: 'ok',
     health: '/api/health',
-    docs: 'See README for API endpoints'
+    docs: '/docs'
   )
 end
 

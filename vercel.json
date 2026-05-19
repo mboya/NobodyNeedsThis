@@ -10,6 +10,7 @@
           "app.rb",
           "payment_simulator.rb",
           "lib/**",
+          "views/**",
           "Gemfile",
           "Gemfile.lock"
         ]
