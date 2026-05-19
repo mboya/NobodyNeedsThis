@@ -2,6 +2,7 @@
 
 require 'securerandom'
 require_relative 'app_config'
+require_relative 'api_key_store'
 
 module Security
   WEBHOOK_PATHS = %w[
@@ -12,11 +13,17 @@ module Security
   ].freeze
 
   PUBLIC_PATHS = %w[/ /docs /api/health].freeze
+  PUBLIC_ROUTES = [
+    { method: 'POST', path: '/api/keys' }
+  ].freeze
 
   module_function
 
-  def public_path?(path)
-    PUBLIC_PATHS.include?(path)
+  def public_path?(path, method: 'GET')
+    return true if PUBLIC_PATHS.include?(path)
+    return true if PUBLIC_ROUTES.any? { |r| r[:path] == path && r[:method] == method }
+
+    false
   end
 
   def webhook_path?(path)
@@ -37,7 +44,9 @@ module Security
     return false if key.nil? || key.empty?
     return true if valid_admin_key?(key)
 
-    AppConfig.api_keys.any? { |stored| secure_compare(stored, key) }
+    return true if AppConfig.env_api_keys.any? { |stored| secure_compare(stored, key) }
+
+    ApiKeyStore.valid?(key)
   end
 
   def valid_admin_key?(key)
