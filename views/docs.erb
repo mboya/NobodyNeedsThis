@@ -3,12 +3,13 @@
   <span class="badge badge-demo">Demo only</span>
   <span class="badge badge-env"><%= @environment %></span>
   <h1>Payment Simulator API</h1>
-  <p>Fake M-Pesa &amp; bank transfer API for local dev, demos, and webhook testing. Not for real money.</p>
+  <p>Fake M-Pesa, PesaLink &amp; bank transfer API for local dev, demos, and webhook testing. Not for real money.</p>
   <nav>
     <a href="#auth">Authentication</a>
     <a href="#endpoints">Endpoints</a>
     <a href="#webhooks">Webhooks</a>
     <a href="#mpesa-codes">M-Pesa codes</a>
+    <a href="#pesalink-codes">PesaLink codes</a>
     <a href="/api/health">Health JSON</a>
   </nav>
 </header>
@@ -96,6 +97,7 @@
   <ul style="margin: 0.5rem 0 0 1.25rem; font-size: 0.9rem;">
     <li><code>http://localhost:4567/webhooks/mpesa</code> (local receiver)</li>
     <li><code>…/webhooks/bank</code></li>
+    <li><code>…/webhooks/pesalink</code></li>
   </ul>
   <p style="margin-top:0.75rem;font-size:0.85rem;color:var(--muted);">
     On serverless hosts (e.g. Vercel), prefer <code>auto_complete: false</code> and call the manual callback endpoints, or use a public inbox like webhook.site.
@@ -108,6 +110,19 @@
     <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
     <tbody>
       <% @mpesa_codes.each do |code, label| %>
+      <tr><td><code><%= code %></code></td><td><%= label %></td></tr>
+      <% end %>
+    </tbody>
+  </table>
+</section>
+
+<h2 id="pesalink-codes">PesaLink response codes</h2>
+<section class="card">
+  <p style="font-size:0.85rem;color:var(--muted);">ISO 8583-shaped, fake. <code>force_outcome</code> on /send and /complete: success, insufficient_funds, issuer_unavailable, invalid_account, duplicate.</p>
+  <table>
+    <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <% @pesalink_codes.each do |code, label| %>
       <tr><td><code><%= code %></code></td><td><%= label %></td></tr>
       <% end %>
     </tbody>
