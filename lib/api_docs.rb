@@ -122,13 +122,89 @@ module ApiDocs
         ]
       },
       {
+        method: 'POST',
+        path: '/api/payments/pesalink/name-inquiry',
+        title: 'PesaLink name inquiry',
+        auth: true,
+        description: 'Resolve a beneficiary before sending. STA: bank_code + account_number. STP: phone_number. Deterministic fake names (same inputs always return the same name). Sentinels: account ending 00 → 14 not found (HTTP 404); phone with even last digit → not linked (HTTP 404).',
+        body: <<~JSON.strip,
+          {
+            "bank_code": "68",
+            "account_number": "0123456789"
+          }
+        JSON
+        params: [
+          ['bank_code', 'STA', 'Illustrative sort code, e.g. 68 = Equity'],
+          ['account_number', 'STA', 'Ends in 00 → not found'],
+          ['phone_number', 'STP', 'Even last digit → not linked']
+        ],
+        response: '{ "success": true, "found": true, "response_code": "00", "bank_code": "68", "bank_name": "Equity Bank Kenya", "account_number": "0123456789", "account_name": "WANJIKU MWANGI" }'
+      },
+      {
+        method: 'POST',
+        path: '/api/payments/pesalink/send',
+        title: 'PesaLink send',
+        auth: true,
+        description: 'Initiate a fake IPSL credit transfer. type=account (STA) needs bank_code+account_number; type=phone (STP) needs phone_number. Amounts outside KES 10–999,999 return 422 with code 61. auto_complete (default true) fires a callback after ~2s — unreliable on Vercel; use POST /complete there. force_outcome: success | insufficient_funds | issuer_unavailable | invalid_account | duplicate.',
+        body: <<~JSON.strip,
+          {
+            "type": "account",
+            "bank_code": "68",
+            "account_number": "0123456789",
+            "amount": 500,
+            "reference": "INV-123",
+            "narration": "Payment",
+            "callback_url": "https://your-app.com/webhooks/pesalink",
+            "auto_complete": true,
+            "force_outcome": "success"
+          }
+        JSON
+        params: [
+          ['type', 'no', "account (STA, default) or phone (STP)"],
+          ['bank_code', 'STA', 'Required for type=account'],
+          ['account_number', 'STA', 'Required for type=account'],
+          ['phone_number', 'STP', 'Required for type=phone; odd last digit = linked'],
+          ['amount', 'yes', 'KES 10–999,999 or 422 / code 61'],
+          ['reference', 'no', 'Default: TEST'],
+          ['narration', 'no', 'Default: Payment'],
+          ['callback_url', 'no', 'Webhook URL on completion'],
+          ['auto_complete', 'no', 'Default true (~2s). On Vercel use /complete instead'],
+          ['force_outcome', 'no', 'success | insufficient_funds | issuer_unavailable | invalid_account | duplicate']
+        ]
+      },
+      {
+        method: 'POST',
+        path: '/api/payments/pesalink/complete',
+        title: 'PesaLink complete (manual)',
+        auth: true,
+        description: 'Manually complete a PesaLink transfer. This is the reliable path on Vercel — background threads die after the HTTP response, so do not depend on auto_complete there. Returns ISO 8583-style codes (00 success + rrn, 51, 91 reversed, 14, 94).',
+        body: <<~JSON.strip,
+          {
+            "transaction_id": "PSLABC123",
+            "force_outcome": "success"
+          }
+        JSON
+        params: [
+          ['transaction_id', 'yes', 'From /send response'],
+          ['force_outcome', 'no', 'Same values as /send']
+        ]
+      },
+      {
+        method: 'GET',
+        path: '/api/payments/pesalink/banks',
+        title: 'PesaLink banks',
+        auth: true,
+        description: 'Illustrative Kenyan sort codes used by this fake switch. Not the official IPSL participant list.',
+        response: '{ "success": true, "note": "Illustrative sort codes, not the official IPSL participant list.", "banks": [{ "code": "01", "name": "KCB Bank Kenya" }, { "code": "68", "name": "Equity Bank Kenya" }] }'
+      },
+      {
         method: 'GET',
         path: '/api/payments/:transaction_id',
         title: 'Transaction status',
         auth: true,
         description: 'Get the current state of a single transaction.',
         params: [
-          ['transaction_id', 'yes', 'Path parameter, e.g. MPX… or BNK…']
+          ['transaction_id', 'yes', 'Path parameter, e.g. MPX…, BNK…, or PSL…']
         ]
       },
       {
@@ -139,7 +215,7 @@ module ApiDocs
         description: 'List in-memory transactions. Optional query filters.',
         params: [
           ['status', 'query', 'pending | processing | completed | failed | cancelled'],
-          ['method', 'query', 'mpesa | bank_transfer']
+          ['method', 'query', 'mpesa | bank_transfer | pesalink']
         ]
       },
       {
@@ -161,6 +237,17 @@ module ApiDocs
       [1037, 'Timeout (no PIN)'],
       [2001, 'Wrong PIN'],
       [1, 'Insufficient balance']
+    ]
+  end
+
+  def pesalink_result_codes
+    [
+      ['00', 'Approved (sets an rrn)'],
+      ['14', 'Invalid / not found account (or phone not linked)'],
+      ['51', 'Insufficient funds'],
+      ['61', 'Exceeds PesaLink amount limit (HTTP 422 on /send)'],
+      ['91', 'Receiving bank timeout — reversed: true'],
+      ['94', 'Duplicate transmission']
     ]
   end
 end
