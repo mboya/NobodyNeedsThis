@@ -55,6 +55,19 @@ class E2ERunner
     assert_bank_auto_success
     assert_bank_auto_failure
 
+    section 'PesaLink'
+    assert_pesalink_send_missing_amount
+    assert_pesalink_stp_missing_phone
+    assert_pesalink_banks
+    assert_pesalink_name_inquiry_deterministic
+    assert_pesalink_name_inquiry_not_found
+    assert_pesalink_stp_unlinked_phone
+    assert_pesalink_sta_happy_path
+    assert_pesalink_issuer_unavailable
+    assert_pesalink_amount_limit
+    assert_pesalink_stp_linked_phone
+    assert_pesalink_get_status
+
     unless SKIP_WEBHOOKS
       section 'Webhooks'
       reset_webhooks
@@ -233,7 +246,13 @@ class E2ERunner
 
       payload = JSON.parse(req[:content], symbolize_names: true)
       path = req[:url].to_s
-      type = path.include?('bank') ? 'bank' : 'mpesa'
+      type = if path.include?('pesalink')
+               'pesalink'
+             elsif path.include?('bank')
+               'bank'
+             else
+               'mpesa'
+             end
       { type: type, timestamp: req[:created_at], payload: payload }
     rescue JSON::ParserError
       nil
@@ -418,6 +437,154 @@ class E2ERunner
     txn_id = body[:transaction_id]
     status = wait_for_transaction_status(txn_id, 'failed')
     status.dig(:transaction, :status) == 'failed' ? pass('Bank auto-complete failure') : fail('Bank auto-complete failure', status.dig(:transaction, :status).to_s)
+  end
+
+  def assert_pesalink_send_missing_amount
+    code, body = post('/api/payments/pesalink/send', {
+      bank_code: '68', account_number: '0123456789', auto_complete: false
+    })
+    if code == 400 && body[:success] == false
+      pass('PesaLink send rejects missing amount', 'HTTP 400')
+    else
+      fail('PesaLink send rejects missing amount', "HTTP #{code}")
+    end
+  end
+
+  def assert_pesalink_stp_missing_phone
+    code, body = post('/api/payments/pesalink/send', {
+      type: 'phone', amount: 500, auto_complete: false
+    })
+    if code == 400 && body[:success] == false
+      pass('PesaLink STP rejects missing phone_number', 'HTTP 400')
+    else
+      fail('PesaLink STP rejects missing phone_number', "HTTP #{code}")
+    end
+  end
+
+  def assert_pesalink_name_inquiry_deterministic
+    payload = { bank_code: '68', account_number: '0123456789' }
+    code1, first = post('/api/payments/pesalink/name-inquiry', payload)
+    code2, second = post('/api/payments/pesalink/name-inquiry', payload)
+    name = first[:account_name]
+
+    if code1 == 200 && code2 == 200 && first[:success] && first[:response_code].to_s == '00' &&
+       name && name == second[:account_name] && second[:response_code].to_s == '00'
+      pass('PesaLink name-inquiry is deterministic', "#{name} code 00")
+    else
+      fail('PesaLink name-inquiry is deterministic', "HTTP #{code1}/#{code2} name=#{name.inspect} code=#{first[:response_code]}")
+    end
+  end
+
+  def assert_pesalink_banks
+    code, body = get('/api/payments/pesalink/banks')
+    codes = Array(body[:banks]).map { |b| b[:code].to_s }
+    if code == 200 && codes.include?('01') && codes.include?('68') && codes.length >= 8
+      pass('PesaLink banks registry', "#{codes.length} banks")
+    else
+      fail('PesaLink banks registry', "HTTP #{code} codes=#{codes.inspect}")
+    end
+  end
+
+  def assert_pesalink_stp_unlinked_phone
+    code, body = post('/api/payments/pesalink/name-inquiry', {
+      phone_number: '254712345672'
+    })
+    if code == 404 && body[:response_code].to_s == '14'
+      pass('PesaLink STP even digit not linked', 'code 14')
+    else
+      fail('PesaLink STP even digit not linked', "HTTP #{code} code=#{body[:response_code]}")
+    end
+  end
+
+  def assert_pesalink_name_inquiry_not_found
+    code, body = post('/api/payments/pesalink/name-inquiry', {
+      bank_code: '68', account_number: '0123456700'
+    })
+    if code == 404 && body[:response_code].to_s == '14'
+      pass('PesaLink name-inquiry 404 for account ending 00', 'code 14')
+    else
+      fail('PesaLink name-inquiry 404 for account ending 00', "HTTP #{code} code=#{body[:response_code]}")
+    end
+  end
+
+  def assert_pesalink_sta_happy_path
+    code, body = post('/api/payments/pesalink/send', {
+      bank_code: '68', account_number: '0123456789', amount: 500,
+      auto_complete: false, force_outcome: 'success'
+    })
+    return fail('PesaLink STA initiate', "HTTP #{code} #{body}") unless code == 200 && body[:success] && body[:transaction_id].to_s.start_with?('PSL')
+
+    txn_id = body[:transaction_id]
+    code, result = post('/api/payments/pesalink/complete', {
+      transaction_id: txn_id, force_outcome: 'success'
+    })
+    if code == 200 && result[:response_code].to_s == '00' && present_rrn?(result[:rrn])
+      pass('PesaLink STA happy path', "rrn #{result[:rrn]}")
+    else
+      fail('PesaLink STA happy path', "HTTP #{code} code=#{result[:response_code]} rrn=#{result[:rrn].inspect}")
+    end
+  end
+
+  def assert_pesalink_issuer_unavailable
+    _, body = post('/api/payments/pesalink/send', {
+      bank_code: '01', account_number: '1111111111', amount: 250,
+      auto_complete: false
+    })
+    return fail('PesaLink issuer_unavailable initiate', body.to_s) unless body[:success]
+
+    _, result = post('/api/payments/pesalink/complete', {
+      transaction_id: body[:transaction_id], force_outcome: 'issuer_unavailable'
+    })
+    if result[:response_code].to_s == '91' && result[:reversed] == true
+      pass('PesaLink issuer_unavailable', 'code 91 reversed')
+    else
+      fail('PesaLink issuer_unavailable', "code=#{result[:response_code]} reversed=#{result[:reversed]}")
+    end
+  end
+
+  def assert_pesalink_amount_limit
+    code, body = post('/api/payments/pesalink/send', {
+      bank_code: '68', account_number: '0123456789', amount: 2_000_000,
+      auto_complete: false
+    })
+    if code == 422 && body[:response_code].to_s == '61'
+      pass('PesaLink amount limit 422', 'code 61')
+    else
+      fail('PesaLink amount limit 422', "HTTP #{code} code=#{body[:response_code]}")
+    end
+  end
+
+  def assert_pesalink_stp_linked_phone
+    code, body = post('/api/payments/pesalink/send', {
+      type: 'phone', phone_number: '254712345679', amount: 750,
+      auto_complete: false
+    })
+    if code == 200 && body[:success] && present_rrn?(body[:beneficiary_name])
+      pass('PesaLink STP linked phone', body[:beneficiary_name])
+    else
+      fail('PesaLink STP linked phone', "HTTP #{code} #{body}")
+    end
+  end
+
+  def assert_pesalink_get_status
+    _, body = post('/api/payments/pesalink/send', {
+      bank_code: '68', account_number: '0123456789', amount: 300,
+      auto_complete: false
+    })
+    txn_id = body[:transaction_id]
+    post('/api/payments/pesalink/complete', { transaction_id: txn_id, force_outcome: 'success' })
+
+    code, status = get("/api/payments/#{txn_id}")
+    txn = status[:transaction]
+    if code == 200 && txn && txn[:status] == 'completed' && txn[:response_code].to_s == '00' && present_rrn?(txn[:rrn])
+      pass('PesaLink GET /api/payments/:id reflects completion', txn_id)
+    else
+      fail('PesaLink GET /api/payments/:id reflects completion', "HTTP #{code} status=#{txn&.dig(:status)}")
+    end
+  end
+
+  def present_rrn?(value)
+    !(value.nil? || value.to_s.strip.empty?)
   end
 
   def assert_mpesa_webhook_success
