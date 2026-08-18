@@ -119,6 +119,41 @@ post '/webhooks/bank' do
   json(success: true, message: 'Webhook received')
 end
 
+# PesaLink webhook endpoint
+post '/webhooks/pesalink' do
+  request_body = JSON.parse(request.body.read, symbolize_names: true)
+
+  puts "\n" + '=' * 60
+  puts '📥 PESALINK WEBHOOK RECEIVED'
+  puts '=' * 60
+  puts "Timestamp: #{Time.now}"
+  puts 'Payload:'
+  puts JSON.pretty_generate(request_body)
+  puts '=' * 60
+
+  if request_body[:success] && request_body[:response_code].to_s == '00'
+    puts '✅ TRANSFER APPROVED'
+    puts "   Transaction ID: #{request_body[:transaction_id]}"
+    puts "   RRN: #{request_body[:rrn]}"
+    puts "   Amount: KES #{request_body[:amount]}"
+    puts "   Beneficiary: #{request_body[:beneficiary_name]}"
+  else
+    puts '❌ TRANSFER FAILED'
+    puts "   Code: #{request_body[:response_code]}"
+    puts "   Reversed: #{request_body[:reversed]}"
+    puts "   Reason: #{request_body[:message]}"
+  end
+
+  $received_webhooks << {
+    type: 'pesalink',
+    timestamp: Time.now.iso8601,
+    payload: request_body
+  }
+
+  status 200
+  json(success: true, message: 'Webhook received')
+end
+
 # Endpoint to view all received webhooks
 get '/webhooks' do
   json(
@@ -144,10 +179,11 @@ configure do
   puts "Webhook Receiver - Running on http://localhost:4567"
   puts "=" * 60
   puts "\nEndpoints:"
-  puts "  POST   /webhooks/mpesa   - Receive M-Pesa callbacks"
-  puts "  POST   /webhooks/bank    - Receive bank transfer callbacks"
-  puts "  GET    /webhooks         - View all received webhooks"
-  puts "  POST   /webhooks/clear   - Clear webhook history"
+  puts "  POST   /webhooks/mpesa     - Receive M-Pesa callbacks"
+  puts "  POST   /webhooks/bank      - Receive bank transfer callbacks"
+  puts "  POST   /webhooks/pesalink  - Receive PesaLink callbacks"
+  puts "  GET    /webhooks           - View all received webhooks"
+  puts "  POST   /webhooks/clear     - Clear webhook history"
   puts "\nExample usage with payment simulator:"
   puts "  curl -X POST http://localhost:3000/api/payments/mpesa/stk-push \\"
   puts "    -H 'Content-Type: application/json' \\"
@@ -211,6 +247,11 @@ __END__
     <div class="endpoint">
       <strong>POST /webhooks/bank</strong>
       <p>Receives bank transfer callbacks</p>
+    </div>
+    
+    <div class="endpoint">
+      <strong>POST /webhooks/pesalink</strong>
+      <p>Receives PesaLink transfer callbacks</p>
     </div>
     
     <div class="endpoint">
