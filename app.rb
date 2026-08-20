@@ -13,6 +13,9 @@ require_relative 'lib/tenant_registry'
 require_relative 'lib/api_docs'
 require_relative 'lib/docs_helpers'
 require_relative 'payment_simulator'
+require_relative 'lib/pesalink'
+
+PaymentSimulator::Simulator.include(PaymentSimulator::Pesalink)
 
 set :views, File.expand_path('views', __dir__)
 
@@ -45,7 +48,7 @@ elsif AppConfig.development?
   ]
 end
 set :allow_methods, 'GET,POST,OPTIONS'
-set :allow_headers, 'content-type,authorization,x-api-key,x-request-id'
+set :allow_headers, 'content-type,authorization,x-api-key,x-request-id,idempotency-key'
 
 $general_rate_limiter = RateLimiter.new(
   max_requests: AppConfig.rate_limit_max,
@@ -62,6 +65,24 @@ $key_registration_rate_limiter = RateLimiter.new(
 
 def halt_json(status_code, payload)
   halt status_code, payload.to_json
+end
+
+def present_field?(value)
+  !(value.nil? || value.to_s.strip.empty?)
+end
+
+def infer_pesalink_type(body)
+  explicit = body[:type].to_s.strip.downcase
+  return explicit unless explicit.empty?
+
+  present_field?(body[:phone_number]) && !present_field?(body[:account_number]) ? 'phone' : 'account'
+end
+
+def extract_idempotency_key(body)
+  header = request.env['HTTP_IDEMPOTENCY_KEY'].to_s.strip
+  return header unless header.empty?
+
+  body[:idempotency_key]
 end
 
 def require_api_key!
@@ -211,6 +232,27 @@ def schedule_bank_completion(transaction_id, delay, force_success = nil, simulat
   end
 end
 
+def schedule_pesalink_completion(transaction_id, delay, force_outcome = nil, simulator:)
+  Thread.new do
+    sleep delay
+    result = simulator.simulate_pesalink_completion(transaction_id, force_outcome: force_outcome)
+    txn = simulator.transactions[transaction_id]
+
+    StructuredLogger.info(
+      event: 'callback.pesalink.completed',
+      transaction_id: transaction_id,
+      response_code: result[:response_code],
+      webhook_sent: txn&.dig(:webhook_sent) == true
+    )
+  rescue StandardError => e
+    StructuredLogger.error(
+      event: 'callback.pesalink.failed',
+      transaction_id: transaction_id,
+      error: e.message
+    )
+  end
+end
+
 before do
   assign_request_id!
   enforce_rate_limit!
@@ -235,6 +277,7 @@ get '/docs' do
   @registration_enabled = AppConfig.registration_enabled?
   @endpoints = DocsHelpers.prepare_endpoints(base)
   @mpesa_codes = ApiDocs.mpesa_result_codes
+  @pesalink_codes = ApiDocs.pesalink_result_codes
   content_type 'text/html'
   erb :docs, layout: :layout
 end
@@ -419,6 +462,120 @@ post '/api/payments/bank-transfer/complete' do
   json result
 end
 
+get '/api/payments/pesalink/banks' do
+  json(
+    success: true,
+    note: 'Illustrative sort codes, not the official IPSL participant list.',
+    banks: current_simulator.pesalink_banks
+  )
+end
+
+post '/api/payments/pesalink/name-inquiry' do
+  request_body = JSON.parse(request.body.read, symbolize_names: true)
+
+  has_account = present_field?(request_body[:bank_code]) && present_field?(request_body[:account_number])
+  has_phone = present_field?(request_body[:phone_number])
+
+  unless has_account || has_phone
+    status 400
+    return json(success: false, message: 'Provide bank_code and account_number, or phone_number')
+  end
+
+  result = if has_account
+             current_simulator.pesalink_name_inquiry(
+               bank_code: request_body[:bank_code],
+               account_number: request_body[:account_number]
+             )
+           else
+             current_simulator.pesalink_name_inquiry(phone_number: request_body[:phone_number])
+           end
+
+  unless result[:success]
+    status 404
+    return json result
+  end
+
+  json result
+end
+
+post '/api/payments/pesalink/send' do
+  request_body = JSON.parse(request.body.read, symbolize_names: true)
+  type = infer_pesalink_type(request_body)
+
+  unless %w[account phone].include?(type)
+    status 400
+    return json(success: false, message: "type must be 'account' (STA) or 'phone' (STP)")
+  end
+
+  missing = [:amount]
+  if type == 'phone'
+    missing << :phone_number
+  else
+    missing.concat(%i[bank_code account_number])
+  end
+  missing.select! { |field| !present_field?(request_body[field]) }
+
+  if missing.any?
+    status 400
+    return json(success: false, message: 'Missing required fields')
+  end
+
+  sim = current_simulator
+  response = sim.initiate_pesalink_transfer(
+    type: type,
+    bank_code: request_body[:bank_code],
+    account_number: request_body[:account_number],
+    phone_number: request_body[:phone_number],
+    amount: request_body[:amount],
+    reference: request_body[:reference] || PaymentSimulator::Pesalink::DEFAULT_REFERENCE,
+    narration: request_body[:narration] || 'Payment',
+    callback_url: request_body[:callback_url],
+    idempotency_key: extract_idempotency_key(request_body)
+  )
+
+  if response[:conflict]
+    status 409
+    return json response
+  end
+
+  unless response[:success]
+    status 422
+    return json response
+  end
+
+  StructuredLogger.info(
+    event: response[:idempotent_replay] ? 'payment.pesalink.replayed' : 'payment.pesalink.initiated',
+    request_id: Security.request_id(request),
+    transaction_id: response[:transaction_id],
+    amount: request_body[:amount],
+    type: type
+  )
+
+  auto_complete = request_body.fetch(:auto_complete, true)
+  force_outcome = request_body[:force_outcome]
+  if auto_complete && !response[:idempotent_replay]
+    schedule_pesalink_completion(response[:transaction_id], 2, force_outcome, simulator: sim)
+  end
+
+  json response
+end
+
+post '/api/payments/pesalink/complete' do
+  request_body = JSON.parse(request.body.read, symbolize_names: true)
+
+  unless request_body[:transaction_id]
+    status 400
+    return json(success: false, message: 'Missing transaction_id')
+  end
+
+  result = current_simulator.simulate_pesalink_completion(
+    request_body[:transaction_id],
+    force_outcome: request_body[:force_outcome]
+  )
+
+  json result
+end
+
 get '/api/payments/:transaction_id' do
   result = current_simulator.get_transaction_status(params[:transaction_id])
 
@@ -449,7 +606,13 @@ post '/api/payments/reset' do
   json(success: true, message: 'All transactions cleared')
 end
 
+# Sinatra runs this for any HTTP 404, including routes that set status 404
+# themselves (name-inquiry miss, unknown transaction). Keep a body the
+# route already wrote; only fill in unmatched paths.
 not_found do
+  existing = Array(response.body).join
+  next unless existing.empty?
+
   json(success: false, message: 'Endpoint not found')
 end
 

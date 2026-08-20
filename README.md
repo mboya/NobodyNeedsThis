@@ -61,6 +61,7 @@ Set `ENABLE_API_KEY_REGISTRATION=false` and `API_KEY=…` if you prefer a single
 |-------|--------|
 | M-Pesa STK Push | ✓ Fake but convincing |
 | Bank transfers | ✓ Fake but convincing |
+| PesaLink (STA / STP) | ✓ Fake but convincing |
 | Webhooks | ✓ POSTs to your URL so you can pretend you're in prod |
 | Success/failure | ✓ Force it or leave it to RNG (default 95% success) |
 | Transaction IDs & receipts | ✓ Looks real, isn't |
@@ -78,6 +79,10 @@ Set `ENABLE_API_KEY_REGISTRATION=false` and `API_KEY=…` if you prefer a single
 | POST | `/api/payments/mpesa/callback` | Manually trigger callback |
 | POST | `/api/payments/bank-transfer` | Start bank transfer |
 | POST | `/api/payments/bank-transfer/complete` | Manually complete transfer |
+| POST | `/api/payments/pesalink/name-inquiry` | Lookup a fake beneficiary |
+| POST | `/api/payments/pesalink/send` | Start a PesaLink transfer |
+| POST | `/api/payments/pesalink/complete` | Manually complete (use this on Vercel) |
+| GET | `/api/payments/pesalink/banks` | Illustrative sort codes |
 | GET | `/api/payments/:id` | Check status |
 | GET | `/api/payments` | List all (for your dashboard of fake money) |
 | POST | `/api/payments/reset` | Nuclear option: clear everything |
@@ -121,11 +126,42 @@ curl -X POST http://localhost:3000/api/payments/bank-transfer \
   }'
 ```
 
+### PesaLink
+
+Kenya's interbank instant rail, minus the actual IPSL. Name inquiry is deterministic (same account always yields the same fake name). Accounts ending in `00` are not found. Phones with an even last digit are not linked. Amounts outside KES 10–999,999 get code `61`.
+
+Retries: send `Idempotency-Key` (or `idempotency_key` in the body). A non-default `reference` also keys the transfer. Same payload returns the original `PSL…` id (`idempotent_replay: true`). A different payload with that key returns 409 / `94`. Default `reference: TEST` is not a key — those always create a new transfer.
+
+On Vercel, skip `auto_complete` and hit `/complete` yourself — background threads do not survive the response.
+
+```bash
+curl -X POST http://localhost:3000/api/payments/pesalink/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "bank_code": "68",
+    "account_number": "0123456789",
+    "amount": 500,
+    "auto_complete": false
+  }'
+```
+
+| Param | Required | Notes |
+|-------|----------|-------|
+| `type` | No | `account` (STA, default) or `phone` (STP) |
+| `bank_code` + `account_number` | STA | Illustrative sort codes from `GET /api/payments/pesalink/banks` |
+| `phone_number` | STP | Odd last digit = linked |
+| `amount` | Yes | KES 10–999,999 |
+| `reference` | No | Default `TEST` (no dedupe). Any other value is an idempotency key |
+| `idempotency_key` | No | Or `Idempotency-Key` header. Retry returns original `PSL…`; mismatch → 409 |
+| `callback_url` | No | Webhook on completion |
+| `auto_complete` | No | Default true (~2s). Unreliable on Vercel — use `/complete` |
+| `force_outcome` | No | `success` / `insufficient_funds` / `issuer_unavailable` / `invalid_account` / `duplicate` |
+
 ---
 
 ## Webhooks
 
-Include `callback_url` in your request. When the payment completes (or fails), we POST the callback to that URL. Same shape as real M-Pesa / bank providers.
+Include `callback_url` in your request. When the payment completes (or fails), we POST the callback to that URL. Same shape as real M-Pesa / bank providers. Local receiver paths: `/webhooks/mpesa`, `/webhooks/bank`, `/webhooks/pesalink`.
 
 ### Test webhooks locally
 
