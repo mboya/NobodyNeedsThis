@@ -67,6 +67,8 @@ class E2ERunner
     assert_pesalink_amount_limit
     assert_pesalink_stp_linked_phone
     assert_pesalink_get_status
+    assert_pesalink_idempotent_replay
+    assert_pesalink_idempotent_conflict
 
     unless SKIP_WEBHOOKS
       section 'Webhooks'
@@ -171,12 +173,13 @@ class E2ERunner
     @api_key = body[:api_key] if reg_code == 200 && body[:api_key]
   end
 
-  def http_request(method, path, body: nil, auth: true)
+  def http_request(method, path, body: nil, auth: true, headers: {})
     uri = URI("#{BASE}#{path}")
     req_class = Net::HTTP.const_get(method.capitalize)
     req = req_class.new(uri)
     req['Content-Type'] = 'application/json'
     req['Authorization'] = "Bearer #{@api_key}" if auth && @api_key
+    headers.each { |name, value| req[name] = value }
     apply_vercel_headers(req)
     req.body = body.to_json if body
     response = http_for(uri).request(req)
@@ -197,8 +200,8 @@ class E2ERunner
     http_request('Get', path)
   end
 
-  def post(path, body)
-    http_request('Post', path, body: body)
+  def post(path, body, headers: {})
+    http_request('Post', path, body: body, headers: headers)
   end
 
   def reset_webhooks
@@ -580,6 +583,52 @@ class E2ERunner
       pass('PesaLink GET /api/payments/:id reflects completion', txn_id)
     else
       fail('PesaLink GET /api/payments/:id reflects completion', "HTTP #{code} status=#{txn&.dig(:status)}")
+    end
+  end
+
+  def assert_pesalink_idempotent_replay
+    payload = {
+      bank_code: '68', account_number: '0123456789', amount: 500,
+      reference: 'INV-E2E-IDEM', auto_complete: false
+    }
+    code1, first = post('/api/payments/pesalink/send', payload)
+    code2, second = post('/api/payments/pesalink/send', payload)
+    _, listed = get('/api/payments?method=pesalink')
+    matching = Array(listed[:transactions]).count { |t| t[:reference] == 'INV-E2E-IDEM' }
+
+    header_payload = {
+      bank_code: '01', account_number: '55501', amount: 250,
+      auto_complete: false
+    }
+    code3, keyed = post('/api/payments/pesalink/send', header_payload, headers: { 'Idempotency-Key' => 'e2e-header-key' })
+    code4, keyed_replay = post('/api/payments/pesalink/send', header_payload, headers: { 'Idempotency-Key' => 'e2e-header-key' })
+
+    if code1 == 200 && code2 == 200 && first[:transaction_id] == second[:transaction_id] &&
+       second[:idempotent_replay] == true && matching == 1 &&
+       code3 == 200 && code4 == 200 && keyed[:transaction_id] == keyed_replay[:transaction_id] &&
+       keyed_replay[:idempotent_replay] == true
+      pass('PesaLink send idempotent replay', first[:transaction_id])
+    else
+      fail(
+        'PesaLink send idempotent replay',
+        "ref=#{first[:transaction_id]}/#{second[:transaction_id]} replay=#{second[:idempotent_replay]} count=#{matching}"
+      )
+    end
+  end
+
+  def assert_pesalink_idempotent_conflict
+    post('/api/payments/pesalink/send', {
+      bank_code: '68', account_number: '0123456789', amount: 400,
+      idempotency_key: 'e2e-conflict', auto_complete: false
+    })
+    code, body = post('/api/payments/pesalink/send', {
+      bank_code: '68', account_number: '0123456789', amount: 800,
+      idempotency_key: 'e2e-conflict', auto_complete: false
+    })
+    if code == 409 && body[:response_code].to_s == '94' && body[:conflict] == true
+      pass('PesaLink send idempotency conflict', 'HTTP 409 code 94')
+    else
+      fail('PesaLink send idempotency conflict', "HTTP #{code} code=#{body[:response_code]}")
     end
   end
 

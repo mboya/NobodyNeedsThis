@@ -48,7 +48,7 @@ elsif AppConfig.development?
   ]
 end
 set :allow_methods, 'GET,POST,OPTIONS'
-set :allow_headers, 'content-type,authorization,x-api-key,x-request-id'
+set :allow_headers, 'content-type,authorization,x-api-key,x-request-id,idempotency-key'
 
 $general_rate_limiter = RateLimiter.new(
   max_requests: AppConfig.rate_limit_max,
@@ -76,6 +76,13 @@ def infer_pesalink_type(body)
   return explicit unless explicit.empty?
 
   present_field?(body[:phone_number]) && !present_field?(body[:account_number]) ? 'phone' : 'account'
+end
+
+def extract_idempotency_key(body)
+  header = request.env['HTTP_IDEMPOTENCY_KEY'].to_s.strip
+  return header unless header.empty?
+
+  body[:idempotency_key]
 end
 
 def require_api_key!
@@ -520,10 +527,16 @@ post '/api/payments/pesalink/send' do
     account_number: request_body[:account_number],
     phone_number: request_body[:phone_number],
     amount: request_body[:amount],
-    reference: request_body[:reference] || 'TEST',
+    reference: request_body[:reference] || PaymentSimulator::Pesalink::DEFAULT_REFERENCE,
     narration: request_body[:narration] || 'Payment',
-    callback_url: request_body[:callback_url]
+    callback_url: request_body[:callback_url],
+    idempotency_key: extract_idempotency_key(request_body)
   )
+
+  if response[:conflict]
+    status 409
+    return json response
+  end
 
   unless response[:success]
     status 422
@@ -531,7 +544,7 @@ post '/api/payments/pesalink/send' do
   end
 
   StructuredLogger.info(
-    event: 'payment.pesalink.initiated',
+    event: response[:idempotent_replay] ? 'payment.pesalink.replayed' : 'payment.pesalink.initiated',
     request_id: Security.request_id(request),
     transaction_id: response[:transaction_id],
     amount: request_body[:amount],
@@ -540,7 +553,9 @@ post '/api/payments/pesalink/send' do
 
   auto_complete = request_body.fetch(:auto_complete, true)
   force_outcome = request_body[:force_outcome]
-  schedule_pesalink_completion(response[:transaction_id], 2, force_outcome, simulator: sim) if auto_complete
+  if auto_complete && !response[:idempotent_replay]
+    schedule_pesalink_completion(response[:transaction_id], 2, force_outcome, simulator: sim)
+  end
 
   json response
 end

@@ -145,7 +145,7 @@ module ApiDocs
         path: '/api/payments/pesalink/send',
         title: 'PesaLink send',
         auth: true,
-        description: 'Initiate a fake IPSL credit transfer. type=account (STA) needs bank_code+account_number; type=phone (STP) needs phone_number. Amounts outside KES 10–999,999 return 422 with code 61. auto_complete (default true) fires a callback after ~2s — unreliable on Vercel; use POST /complete there. force_outcome: success | insufficient_funds | issuer_unavailable | invalid_account | duplicate.',
+        description: 'Initiate a fake IPSL credit transfer. type=account (STA) needs bank_code+account_number; type=phone (STP) needs phone_number. Amounts outside KES 10–999,999 return 422 with code 61. Retries with the same Idempotency-Key header (or idempotency_key / a non-default reference) return the original PSL… id; a different payload with that key returns 409 / 94. auto_complete (default true) fires a callback after ~2s — unreliable on Vercel; use POST /complete there. force_outcome: success | insufficient_funds | issuer_unavailable | invalid_account | duplicate.',
         body: <<~JSON.strip,
           {
             "type": "account",
@@ -154,6 +154,7 @@ module ApiDocs
             "amount": 500,
             "reference": "INV-123",
             "narration": "Payment",
+            "idempotency_key": "order-123-send",
             "callback_url": "https://your-app.com/webhooks/pesalink",
             "auto_complete": true,
             "force_outcome": "success"
@@ -165,7 +166,8 @@ module ApiDocs
           ['account_number', 'STA', 'Required for type=account'],
           ['phone_number', 'STP', 'Required for type=phone; odd last digit = linked'],
           ['amount', 'yes', 'KES 10–999,999 or 422 / code 61'],
-          ['reference', 'no', 'Default: TEST'],
+          ['reference', 'no', 'Default: TEST (not used for dedupe). Any other value keys retries'],
+          ['idempotency_key', 'no', 'Or Idempotency-Key header. Same key + same payload → original PSL…; mismatch → 409 / 94'],
           ['narration', 'no', 'Default: Payment'],
           ['callback_url', 'no', 'Webhook URL on completion'],
           ['auto_complete', 'no', 'Default true (~2s). On Vercel use /complete instead'],

@@ -48,6 +48,7 @@ module PaymentSimulator
 
     DEFAULT_MIN_AMOUNT = 10.0
     DEFAULT_MAX_AMOUNT = 999_999.0
+    DEFAULT_REFERENCE = 'TEST'
     DEFAULT_FAILURE_WEIGHTS = {
       'insufficient_funds' => 50,
       'issuer_unavailable' => 25,
@@ -91,14 +92,40 @@ module PaymentSimulator
     end
 
     def initiate_pesalink_transfer(type: 'account', bank_code: nil, account_number: nil,
-                                   phone_number: nil, amount:, reference: 'TEST',
-                                   narration: 'Payment', callback_url: nil)
+                                   phone_number: nil, amount:, reference: DEFAULT_REFERENCE,
+                                   narration: 'Payment', callback_url: nil,
+                                   idempotency_key: nil)
       type = type.to_s.downcase
       unless %w[account phone].include?(type)
         return { success: false, message: "type must be 'account' (STA) or 'phone' (STP)" }
       end
 
       numeric_amount = amount.to_f
+      fingerprint = pesalink_send_fingerprint(
+        type: type,
+        bank_code: bank_code,
+        account_number: account_number,
+        phone_number: phone_number,
+        amount: numeric_amount,
+        reference: reference
+      )
+      key = pesalink_resolve_idempotency_key(idempotency_key: idempotency_key, reference: reference)
+
+      if key
+        existing = pesalink_find_by_idempotency_key(key)
+        if existing
+          return pesalink_initiate_payload(existing, replay: true) if existing[:idempotency_fingerprint] == fingerprint
+
+          return {
+            success: false,
+            conflict: true,
+            response_code: '94',
+            transaction_id: existing[:transaction_id],
+            message: 'Idempotency key reused with a different payload'
+          }
+        end
+      end
+
       if numeric_amount < pesalink_min_amount || numeric_amount > pesalink_max_amount
         return {
           success: false,
@@ -139,23 +166,14 @@ module PaymentSimulator
         response_code: nil,
         rrn: nil,
         reversed: false,
-        callback_url: callback_url
+        callback_url: callback_url,
+        idempotency_key: key,
+        idempotency_fingerprint: fingerprint
       }
 
       @transactions[transaction_id] = transaction
 
-      {
-        success: true,
-        message: 'PesaLink transfer initiated',
-        transaction_id: transaction_id,
-        status: PaymentStatus::PROCESSING,
-        type: type,
-        bank_code: inquiry[:bank_code],
-        bank_name: inquiry[:bank_name],
-        account_number: inquiry[:account_number],
-        beneficiary_name: inquiry[:account_name],
-        amount: numeric_amount
-      }
+      pesalink_initiate_payload(transaction, replay: false)
     end
 
     def simulate_pesalink_completion(transaction_id, force_outcome: nil)
@@ -304,6 +322,47 @@ module PaymentSimulator
       format('%012d', SecureRandom.random_number(10**12))
     end
 
+    def pesalink_initiate_payload(transaction, replay:)
+      {
+        success: true,
+        message: replay ? 'PesaLink transfer already initiated' : 'PesaLink transfer initiated',
+        transaction_id: transaction[:transaction_id],
+        status: transaction[:status],
+        type: transaction[:type],
+        bank_code: transaction[:bank_code],
+        bank_name: transaction[:bank_name],
+        account_number: transaction[:account_number],
+        beneficiary_name: transaction[:beneficiary_name],
+        amount: transaction[:amount],
+        idempotent_replay: replay
+      }
+    end
+
+    def pesalink_resolve_idempotency_key(idempotency_key:, reference:)
+      explicit = idempotency_key.to_s.strip
+      return explicit unless explicit.empty?
+
+      ref = reference.to_s.strip
+      return nil if ref.empty? || ref == DEFAULT_REFERENCE
+
+      "ref:#{ref}"
+    end
+
+    def pesalink_find_by_idempotency_key(key)
+      @transactions.values.find { |txn| txn[:method] == METHOD && txn[:idempotency_key] == key }
+    end
+
+    def pesalink_send_fingerprint(type:, bank_code:, account_number:, phone_number:, amount:, reference:)
+      {
+        type: type.to_s,
+        bank_code: bank_code.to_s,
+        account_number: account_number.to_s,
+        phone_number: phone_number.to_s,
+        amount: amount.to_f,
+        reference: reference.to_s
+      }
+    end
+
     def pesalink_completion_payload(transaction, spec)
       {
         success: spec[:code] == '00',
@@ -384,4 +443,30 @@ if __FILE__ == $PROGRAM_NAME
     amount: 2_000_000
   )
   puts over
+
+  puts "\n6. Send-side idempotency (same reference)..."
+  first = sim.initiate_pesalink_transfer(
+    type: 'account',
+    bank_code: '68',
+    account_number: '0123456789',
+    amount: 500,
+    reference: 'INV-IDEMP'
+  )
+  replay = sim.initiate_pesalink_transfer(
+    type: 'account',
+    bank_code: '68',
+    account_number: '0123456789',
+    amount: 500,
+    reference: 'INV-IDEMP'
+  )
+  clash = sim.initiate_pesalink_transfer(
+    type: 'account',
+    bank_code: '68',
+    account_number: '0123456789',
+    amount: 750,
+    reference: 'INV-IDEMP'
+  )
+  puts first
+  puts replay
+  puts clash
 end
